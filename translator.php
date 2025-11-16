@@ -281,27 +281,80 @@ class FileProcessor {
         }, $content);
 
         // Sadece belirli HTML attribute'larını çevir (güvenli olanlar)
-        $safeAttributes = ['title', 'alt', 'placeholder', 'aria-label', 'data-title', 'data-label'];
+        $safeAttributes = ['title', 'alt', 'placeholder', 'aria-label', 'data-title', 'data-label', 'label'];
 
         foreach ($safeAttributes as $attr) {
-            $pattern = '/(' . $attr . ')\s*=\s*"([^"]+)"/i';
-            $content = preg_replace_callback($pattern, function($matches) use ($targetLang) {
-                $attrName = $matches[1];
+            // Hem çift tırnak hem tek tırnak desteği
+            $patterns = [
+                '/(' . $attr . ')\s*=\s*"([^"]+)"/i',
+                '/(' . $attr . ')\s*=\s*\'([^\']+)\'/i'
+            ];
+
+            foreach ($patterns as $pattern) {
+                $content = preg_replace_callback($pattern, function($matches) use ($targetLang) {
+                    $attrName = $matches[1];
+                    $text = $matches[2];
+                    $quote = strpos($matches[0], '"') !== false ? '"' : "'";
+
+                    // Filtreler
+                    if (!$this->shouldTranslate($text)) {
+                        return $matches[0];
+                    }
+
+                    $translated = $this->translator->translate($text, $targetLang);
+                    $this->stats['translated_strings']++;
+
+                    return $attrName . '=' . $quote . $translated . $quote;
+                }, $content);
+            }
+        }
+
+        // Label etiketlerinin içindeki metinleri özel olarak çevir
+        $content = preg_replace_callback('/<label[^>]*>([^<]+)<\/label>/i', function($matches) use ($targetLang) {
+            $fullTag = $matches[0];
+            $text = $matches[1];
+
+            if (!$this->shouldTranslate($text)) {
+                return $fullTag;
+            }
+
+            $translated = $this->translator->translate(trim($text), $targetLang);
+            $this->stats['translated_strings']++;
+
+            return str_replace($text, $translated, $fullTag);
+        }, $content);
+
+        // Önemli metin etiketlerini özel olarak işle (h1-h6, p, span, div, li, a, button)
+        $textTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'li', 'a', 'button', 'td', 'th', 'strong', 'em', 'b', 'i'];
+
+        foreach ($textTags as $tag) {
+            $content = preg_replace_callback('/<' . $tag . '([^>]*)>([^<]+)<\/' . $tag . '>/is', function($matches) use ($targetLang, $tag) {
+                $attributes = $matches[1];
                 $text = $matches[2];
 
-                // Filtreler
+                // PHP kodu varsa atla
+                if (strpos($text, '$') !== false || strpos($text, '<?') !== false) {
+                    return $matches[0];
+                }
+
                 if (!$this->shouldTranslate($text)) {
                     return $matches[0];
                 }
 
-                $translated = $this->translator->translate($text, $targetLang);
+                $translated = $this->translator->translate(trim($text), $targetLang);
                 $this->stats['translated_strings']++;
 
-                return $attrName . '="' . $translated . '"';
+                // Boşlukları koru
+                $leadingSpace = strlen($text) - strlen(ltrim($text));
+                $trailingSpace = strlen($text) - strlen(rtrim($text));
+
+                $finalText = str_repeat(' ', $leadingSpace) . $translated . str_repeat(' ', $trailingSpace);
+
+                return '<' . $tag . $attributes . '>' . $finalText . '</' . $tag . '>';
             }, $content);
         }
 
-        // HTML etiketleri arasındaki düz metinleri çevir (ama dikkatli)
+        // Genel HTML etiketleri arasındaki kalan metinleri çevir
         $content = preg_replace_callback('/>([^<]+)</s', function($matches) use ($targetLang) {
             $text = $matches[1];
 
@@ -311,7 +364,12 @@ class FileProcessor {
             }
 
             // PHP değişkeni veya kodu varsa atla
-            if (strpos($text, '$') !== false || strpos($text, '<?') !== false) {
+            if (strpos($text, '$') !== false || strpos($text, '<?') !== false || strpos($text, '___') !== false) {
+                return $matches[0];
+            }
+
+            // Sadece boşluk ve yeni satır varsa atla
+            if (trim($text) === '') {
                 return $matches[0];
             }
 
@@ -343,32 +401,30 @@ class FileProcessor {
 
     /**
      * Bir metnin çevrilip çevrilmeyeceğini kontrol et
+     * Daha dengeli yaklaşım: Sadece açıkça KOD olan şeyleri atla
      */
     private function shouldTranslate($text) {
         $text = trim($text);
 
-        // Boş veya çok kısa
-        if (strlen($text) < 3) {
+        // Boş
+        if (strlen($text) === 0) {
             return false;
         }
 
-        // Sadece sayı
-        if (is_numeric($text)) {
+        // Sadece sayı veya tek karakter
+        if (is_numeric($text) || strlen($text) === 1) {
             return false;
         }
 
-        // Sadece özel karakterler
+        // Sadece özel karakterler veya noktalama
         if (preg_match('/^[\s\W]+$/', $text)) {
             return false;
         }
 
-        // URL
-        if (preg_match('/^(https?:\/\/|www\.|\/\/)/i', $text)) {
-            return false;
-        }
+        // ÇEVİRME - Kesin kod/teknik içerik:
 
-        // Dosya yolu
-        if (preg_match('/^[\/\\\\]|[a-z]:\\\/i', $text)) {
+        // URL'ler
+        if (preg_match('/^(https?:\/\/|www\.|\/\/|\.\.\/)/i', $text)) {
             return false;
         }
 
@@ -377,21 +433,72 @@ class FileProcessor {
             return false;
         }
 
-        // CSS/JS kodu (class, id, function isimleri)
-        if (preg_match('/^[a-z_][a-z0-9_-]*$/i', $text)) {
+        // Dosya yolları
+        if (preg_match('/^[\/\\\\]|^[a-z]:\\\\/i', $text)) {
             return false;
         }
 
-        // HTML/PHP kod parçaları
-        if (preg_match('/<|>|\{|\}|\$|;|function|class|return|var|const|let/i', $text)) {
+        // Hex renk kodları
+        if (preg_match('/^#[0-9a-f]{3,6}$/i', $text)) {
             return false;
         }
 
-        // Sadece büyük harfler (constant olabilir)
+        // CSS/JS kod yapıları (süslü parantez, dolar işareti, noktalı virgül)
+        if (preg_match('/[\{\}\$;]/', $text)) {
+            return false;
+        }
+
+        // PHP/JS reserved keywords (tam eşleşme)
+        $reservedWords = ['function', 'class', 'return', 'var', 'const', 'let', 'if', 'else',
+                          'for', 'while', 'foreach', 'echo', 'print', 'new', 'this', 'self',
+                          'true', 'false', 'null', 'undefined', 'array', 'object'];
+        if (in_array(strtolower($text), $reservedWords)) {
+            return false;
+        }
+
+        // ÇEVİR - Açıkça metin içerik:
+
+        // Birden fazla kelime (boşluk içeriyor) - büyük ihtimalle metin
+        if (strpos($text, ' ') !== false) {
+            return true;
+        }
+
+        // Noktalama işareti var - cümle olabilir
+        if (preg_match('/[.!?,;:]/', $text)) {
+            return true;
+        }
+
+        // Büyük harfle başlayan 2+ karakter - başlık veya kelime olabilir
+        if (preg_match('/^[A-Z][a-z]/', $text)) {
+            return true;
+        }
+
+        // Küçük harflerden oluşan 3+ karakter kelime - muhtemelen metin
+        if (preg_match('/^[a-z]{3,}$/i', $text) && strlen($text) >= 3) {
+            return true;
+        }
+
+        // Türkçe karakterler içeriyor - kesinlikle çevrilmeli
+        if (preg_match('/[çğıöşüÇĞİÖŞÜ]/', $text)) {
+            return true;
+        }
+
+        // Tek kelime ama çok uzun (10+ karakter) - büyük ihtimalle kod değil
+        if (strlen($text) >= 10) {
+            return true;
+        }
+
+        // Son kontrol: Tamamen küçük harf + tire/alt çizgi = CSS class olabilir
+        if (preg_match('/^[a-z][a-z0-9_-]*$/', $text)) {
+            return false;
+        }
+
+        // SADECE BÜYÜK HARF = constant olabilir
         if (preg_match('/^[A-Z_0-9]+$/', $text)) {
             return false;
         }
 
+        // Varsayılan: ÇEVİR (daha liberal yaklaşım)
         return true;
     }
 
