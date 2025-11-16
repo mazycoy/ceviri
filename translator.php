@@ -246,61 +246,182 @@ class FileProcessor {
      * HTML/PHP dosyalarındaki metinleri çevir
      */
     private function translateHTML($content, $targetLang) {
-        // HTML içindeki metin içeriklerini bul ve çevir
-        $patterns = [
-            // HTML etiketleri arasındaki metinler
-            '/>([^<>]+)</i',
-            // Title, alt, placeholder gibi attributelar
-            '/(title|alt|placeholder|value|aria-label)\s*=\s*["\']([^"\']+)["\']/i',
-            // PHP echo ve print içindeki string'ler
-            '/echo\s+["\']([^"\']+)["\']/i',
-            '/print\s+["\']([^"\']+)["\']/i',
-        ];
+        // DOMDocument kullanarak güvenli çeviri
+        // Önce PHP kodunu koru
+        $phpBlocks = [];
+        $phpIndex = 0;
 
-        foreach ($patterns as $pattern) {
+        // PHP bloklarını geçici placeholder'larla değiştir (tüm formatlar)
+        $content = preg_replace_callback('/<\?(php|=)?.*?\?>/s', function($match) use (&$phpBlocks, &$phpIndex) {
+            $placeholder = "___PHP_BLOCK_" . $phpIndex . "___";
+            $phpBlocks[$placeholder] = $match[0];
+            $phpIndex++;
+            return $placeholder;
+        }, $content);
+
+        // Script ve style etiketlerini koru
+        $scriptBlocks = [];
+        $scriptIndex = 0;
+
+        $content = preg_replace_callback('/<script[^>]*>.*?<\/script>/si', function($match) use (&$scriptBlocks, &$scriptIndex) {
+            $placeholder = "___SCRIPT_BLOCK_" . $scriptIndex . "___";
+            $scriptBlocks[$placeholder] = $match[0];
+            $scriptIndex++;
+            return $placeholder;
+        }, $content);
+
+        $styleBlocks = [];
+        $styleIndex = 0;
+
+        $content = preg_replace_callback('/<style[^>]*>.*?<\/style>/si', function($match) use (&$styleBlocks, &$styleIndex) {
+            $placeholder = "___STYLE_BLOCK_" . $styleIndex . "___";
+            $styleBlocks[$placeholder] = $match[0];
+            $styleIndex++;
+            return $placeholder;
+        }, $content);
+
+        // Sadece belirli HTML attribute'larını çevir (güvenli olanlar)
+        $safeAttributes = ['title', 'alt', 'placeholder', 'aria-label', 'data-title', 'data-label'];
+
+        foreach ($safeAttributes as $attr) {
+            $pattern = '/(' . $attr . ')\s*=\s*"([^"]+)"/i';
             $content = preg_replace_callback($pattern, function($matches) use ($targetLang) {
-                $text = $matches[count($matches) - 1];
+                $attrName = $matches[1];
+                $text = $matches[2];
 
-                // Boşluk veya sadece sayı kontrolü
-                if (trim($text) === '' || is_numeric($text) || strlen($text) < 2) {
+                // Filtreler
+                if (!$this->shouldTranslate($text)) {
                     return $matches[0];
                 }
 
                 $translated = $this->translator->translate($text, $targetLang);
                 $this->stats['translated_strings']++;
 
-                return str_replace($text, $translated, $matches[0]);
+                return $attrName . '="' . $translated . '"';
             }, $content);
+        }
+
+        // HTML etiketleri arasındaki düz metinleri çevir (ama dikkatli)
+        $content = preg_replace_callback('/>([^<]+)</s', function($matches) use ($targetLang) {
+            $text = $matches[1];
+
+            // Filtreler
+            if (!$this->shouldTranslate($text)) {
+                return $matches[0];
+            }
+
+            // PHP değişkeni veya kodu varsa atla
+            if (strpos($text, '$') !== false || strpos($text, '<?') !== false) {
+                return $matches[0];
+            }
+
+            $translated = $this->translator->translate(trim($text), $targetLang);
+            $this->stats['translated_strings']++;
+
+            // Boşlukları koru
+            $leadingSpace = strlen($text) - strlen(ltrim($text));
+            $trailingSpace = strlen($text) - strlen(rtrim($text));
+
+            return '>' . str_repeat(' ', $leadingSpace) . $translated . str_repeat(' ', $trailingSpace) . '<';
+        }, $content);
+
+        // Blokları geri koy (ters sırayla)
+        foreach ($styleBlocks as $placeholder => $styleCode) {
+            $content = str_replace($placeholder, $styleCode, $content);
+        }
+
+        foreach ($scriptBlocks as $placeholder => $scriptCode) {
+            $content = str_replace($placeholder, $scriptCode, $content);
+        }
+
+        foreach ($phpBlocks as $placeholder => $phpCode) {
+            $content = str_replace($placeholder, $phpCode, $content);
         }
 
         return $content;
     }
 
     /**
+     * Bir metnin çevrilip çevrilmeyeceğini kontrol et
+     */
+    private function shouldTranslate($text) {
+        $text = trim($text);
+
+        // Boş veya çok kısa
+        if (strlen($text) < 3) {
+            return false;
+        }
+
+        // Sadece sayı
+        if (is_numeric($text)) {
+            return false;
+        }
+
+        // Sadece özel karakterler
+        if (preg_match('/^[\s\W]+$/', $text)) {
+            return false;
+        }
+
+        // URL
+        if (preg_match('/^(https?:\/\/|www\.|\/\/)/i', $text)) {
+            return false;
+        }
+
+        // Dosya yolu
+        if (preg_match('/^[\/\\\\]|[a-z]:\\\/i', $text)) {
+            return false;
+        }
+
+        // Email
+        if (preg_match('/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i', $text)) {
+            return false;
+        }
+
+        // CSS/JS kodu (class, id, function isimleri)
+        if (preg_match('/^[a-z_][a-z0-9_-]*$/i', $text)) {
+            return false;
+        }
+
+        // HTML/PHP kod parçaları
+        if (preg_match('/<|>|\{|\}|\$|;|function|class|return|var|const|let/i', $text)) {
+            return false;
+        }
+
+        // Sadece büyük harfler (constant olabilir)
+        if (preg_match('/^[A-Z_0-9]+$/', $text)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
      * JavaScript dosyalarındaki string'leri çevir
      */
     private function translateJavaScript($content, $targetLang) {
-        // String literalleri bul
-        $pattern = '/(["\'`])(?:(?=(\\\\?))\2.)*?\1/';
+        // Sadece belirli fonksiyonlardaki string'leri çevir (alert, console.log vb.)
+        $userFacingFunctions = ['alert', 'confirm', 'prompt', 'innerHTML', 'textContent', 'innerText', 'setAttribute'];
 
-        $content = preg_replace_callback($pattern, function($matches) use ($targetLang) {
-            $quote = $matches[1];
-            $text = trim($matches[0], $quote);
+        foreach ($userFacingFunctions as $func) {
+            // alert("text") formatı
+            $pattern = '/' . $func . '\s*\(\s*(["\'])([^"\']+)\1\s*\)/i';
+            $content = preg_replace_callback($pattern, function($matches) use ($targetLang, $func) {
+                $quote = $matches[1];
+                $text = $matches[2];
 
-            if (trim($text) === '' || is_numeric($text) || strlen($text) < 2) {
-                return $matches[0];
-            }
+                if (!$this->shouldTranslate($text)) {
+                    return $matches[0];
+                }
 
-            // URL, kod gibi şeyleri atla
-            if (preg_match('/^(http|https|\/|\.\/|#|var |function |return |const |let )/', $text)) {
-                return $matches[0];
-            }
+                $translated = $this->translator->translate($text, $targetLang);
+                $this->stats['translated_strings']++;
 
-            $translated = $this->translator->translate($text, $targetLang);
-            $this->stats['translated_strings']++;
+                return $func . '(' . $quote . $translated . $quote . ')';
+            }, $content);
+        }
 
-            return $quote . $translated . $quote;
-        }, $content);
+        // NOT: Diğer JavaScript string'lerini çevirmiyoruz çünkü bunlar değişken adları,
+        // API endpoint'leri, CSS class isimleri vb. olabilir
 
         return $content;
     }
@@ -327,9 +448,9 @@ class FileProcessor {
         foreach ($array as $key => $value) {
             if (is_array($value)) {
                 $array[$key] = $this->translateArray($value, $targetLang);
-            } elseif (is_string($value) && strlen(trim($value)) > 1 && !is_numeric($value)) {
-                // URL veya kod değilse çevir
-                if (!preg_match('/^(http|https|\/|#|{|}|\[|\])/', $value)) {
+            } elseif (is_string($value)) {
+                // Daha dikkatli filtreleme
+                if ($this->shouldTranslate($value)) {
                     $array[$key] = $this->translator->translate($value, $targetLang);
                     $this->stats['translated_strings']++;
                 }
@@ -347,7 +468,7 @@ class FileProcessor {
         $content = preg_replace_callback($pattern, function($matches) use ($targetLang) {
             $text = $matches[1];
 
-            if (trim($text) === '' || strlen($text) < 2) {
+            if (!$this->shouldTranslate($text)) {
                 return $matches[0];
             }
 
@@ -364,7 +485,14 @@ class FileProcessor {
      * Plain text çevir
      */
     private function translatePlainText($content, $targetLang) {
-        if (strlen(trim($content)) < 2) {
+        // Plain text dosyaları genellikle config veya log dosyalarıdır
+        // Sadece açıkça metin dosyası olduğundan emin isek çevir
+        if (!$this->shouldTranslate($content)) {
+            return $content;
+        }
+
+        // Çok uzun dosyaları çevirme (performans)
+        if (strlen($content) > 10000) {
             return $content;
         }
 
