@@ -1,0 +1,27 @@
+# cPanel Hosting .htaccess Configuration
+
+# PHP Ayarları
+php_value upload_max_filesize 50M
+php_value post_max_size 50M
+php_value max_execution_time 300
+php_value max_input_time 300
+php_value memory_limit 256M
+
+# Güvenlik
+Options -Indexes
+
+# Sadece uploads ve outputs klasörlerini koru
+<FilesMatch "\.(php|html)$">
+    Order allow,deny
+    Allow from all
+</FilesMatch>
+
+# uploads klasörüne erişimi engelle
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^uploads/ - [F,L]
+</IfModule>
+
+# Hata sayfaları
+ErrorDocument 404 /index.php
+ErrorDocument 403 /index.php

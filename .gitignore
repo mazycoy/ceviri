@@ -1,0 +1,24 @@
+# Klasörler
+uploads/
+outputs/
+
+# API Keys
+config.php
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+error_log
+
+# Temporary
+*.tmp
+*.temp
