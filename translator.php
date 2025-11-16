@@ -325,41 +325,63 @@ class FileProcessor {
         }, $content);
 
         // Önemli metin etiketlerini özel olarak işle (h1-h6, p, span, div, li, a, button)
+        // DÜZELTME: .*? kullanarak tüm içeriği (whitespace dahil) yakala
         $textTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'li', 'a', 'button', 'td', 'th', 'strong', 'em', 'b', 'i'];
 
         foreach ($textTags as $tag) {
-            $content = preg_replace_callback('/<' . $tag . '([^>]*)>([^<]+)<\/' . $tag . '>/is', function($matches) use ($targetLang, $tag) {
+            // Non-greedy .*? pattern ile tüm içeriği yakala (newline ve whitespace dahil)
+            $content = preg_replace_callback('/<' . $tag . '([^>]*)>(.*?)<\/' . $tag . '>/is', function($matches) use ($targetLang, $tag) {
                 $attributes = $matches[1];
                 $text = $matches[2];
 
-                // PHP kodu varsa atla
-                if (strpos($text, '$') !== false || strpos($text, '<?') !== false) {
+                // İç HTML etiketi varsa atla (nested tags)
+                if (preg_match('/<[a-z]/i', $text)) {
                     return $matches[0];
                 }
 
-                if (!$this->shouldTranslate($text)) {
+                // PHP kodu veya placeholder varsa atla
+                if (strpos($text, '$') !== false || strpos($text, '<?') !== false || strpos($text, '___') !== false) {
                     return $matches[0];
                 }
 
-                $translated = $this->translator->translate(trim($text), $targetLang);
+                // Trim edilmiş halini kontrol et
+                $trimmedText = trim($text);
+
+                if (empty($trimmedText)) {
+                    return $matches[0];
+                }
+
+                if (!$this->shouldTranslate($trimmedText)) {
+                    return $matches[0];
+                }
+
+                $translated = $this->translator->translate($trimmedText, $targetLang);
                 $this->stats['translated_strings']++;
 
                 // Boşlukları koru
                 $leadingSpace = strlen($text) - strlen(ltrim($text));
                 $trailingSpace = strlen($text) - strlen(rtrim($text));
 
-                $finalText = str_repeat(' ', $leadingSpace) . $translated . str_repeat(' ', $trailingSpace);
+                // Whitespace karakterlerini koru (space, tab, newline)
+                $leadingWs = substr($text, 0, $leadingSpace);
+                $trailingWs = substr($text, -$trailingSpace);
 
-                return '<' . $tag . $attributes . '>' . $finalText . '</' . $tag . '>';
+                return '<' . $tag . $attributes . '>' . $leadingWs . $translated . $trailingWs . '</' . $tag . '>';
             }, $content);
         }
 
         // Genel HTML etiketleri arasındaki kalan metinleri çevir
-        $content = preg_replace_callback('/>([^<]+)</s', function($matches) use ($targetLang) {
+        // DÜZELTME: .*? pattern ile uzun metinleri ve whitespace'leri yakala
+        $content = preg_replace_callback('/>(.*?)</s', function($matches) use ($targetLang) {
             $text = $matches[1];
 
-            // Filtreler
-            if (!$this->shouldTranslate($text)) {
+            // Sadece boşluk ve yeni satır varsa atla
+            if (trim($text) === '') {
+                return $matches[0];
+            }
+
+            // İç HTML etiketi varsa atla
+            if (preg_match('/<[a-z]/i', $text)) {
                 return $matches[0];
             }
 
@@ -368,19 +390,25 @@ class FileProcessor {
                 return $matches[0];
             }
 
-            // Sadece boşluk ve yeni satır varsa atla
-            if (trim($text) === '') {
+            // Trim edilmiş halini kontrol et
+            $trimmedText = trim($text);
+
+            if (!$this->shouldTranslate($trimmedText)) {
                 return $matches[0];
             }
 
-            $translated = $this->translator->translate(trim($text), $targetLang);
+            $translated = $this->translator->translate($trimmedText, $targetLang);
             $this->stats['translated_strings']++;
 
             // Boşlukları koru
             $leadingSpace = strlen($text) - strlen(ltrim($text));
             $trailingSpace = strlen($text) - strlen(rtrim($text));
 
-            return '>' . str_repeat(' ', $leadingSpace) . $translated . str_repeat(' ', $trailingSpace) . '<';
+            // Whitespace karakterlerini koru
+            $leadingWs = substr($text, 0, $leadingSpace);
+            $trailingWs = substr($text, -$trailingSpace);
+
+            return '>' . $leadingWs . $translated . $trailingWs . '<';
         }, $content);
 
         // Blokları geri koy (ters sırayla)
