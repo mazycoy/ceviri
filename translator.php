@@ -309,52 +309,42 @@ class FileProcessor {
             }
         }
 
-        // Label etiketlerinin içindeki metinleri özel olarak çevir
-        $content = preg_replace_callback('/<label[^>]*>([^<]+)<\/label>/i', function($matches) use ($targetLang) {
-            $fullTag = $matches[0];
-            $text = $matches[1];
+        // ÖNEMLİ: İşlenmiş etiketleri koru (çoklu işleme önleme)
+        $translatedBlocks = [];
+        $translatedIndex = 0;
 
-            if (!$this->shouldTranslate($text)) {
-                return $fullTag;
-            }
+        // Tüm metin içerikli etiketleri tek seferde işle (label + text tags)
+        $allTextTags = ['label', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'li', 'a', 'button', 'td', 'th', 'strong', 'em', 'b', 'i'];
 
-            $translated = $this->translator->translate(trim($text), $targetLang);
-            $this->stats['translated_strings']++;
-
-            return str_replace($text, $translated, $fullTag);
-        }, $content);
-
-        // Önemli metin etiketlerini özel olarak işle (h1-h6, p, span, div, li, a, button)
-        // DÜZELTME: .*? kullanarak tüm içeriği (whitespace dahil) yakala
-        $textTags = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'span', 'li', 'a', 'button', 'td', 'th', 'strong', 'em', 'b', 'i'];
-
-        foreach ($textTags as $tag) {
-            // Non-greedy .*? pattern ile tüm içeriği yakala (newline ve whitespace dahil)
-            $content = preg_replace_callback('/<' . $tag . '([^>]*)>(.*?)<\/' . $tag . '>/is', function($matches) use ($targetLang, $tag) {
+        foreach ($allTextTags as $tag) {
+            // Non-greedy .*? pattern ile tüm içeriği yakala
+            $content = preg_replace_callback('/<' . $tag . '([^>]*)>(.*?)<\/' . $tag . '>/is', function($matches) use ($targetLang, $tag, &$translatedBlocks, &$translatedIndex) {
+                $fullMatch = $matches[0];
                 $attributes = $matches[1];
                 $text = $matches[2];
 
-                // İç HTML etiketi varsa atla (nested tags)
+                // İç HTML etiketi varsa atla (nested tags - başka işlemde yapılır)
                 if (preg_match('/<[a-z]/i', $text)) {
-                    return $matches[0];
+                    return $fullMatch;
                 }
 
                 // PHP kodu veya placeholder varsa atla
-                if (strpos($text, '$') !== false || strpos($text, '<?') !== false || strpos($text, '___') !== false) {
-                    return $matches[0];
+                if (strpos($text, '$') !== false || strpos($text, '<?') !== false || strpos($text, '___TRANSLATED_') !== false || strpos($text, '___') !== false) {
+                    return $fullMatch;
                 }
 
                 // Trim edilmiş halini kontrol et
                 $trimmedText = trim($text);
 
                 if (empty($trimmedText)) {
-                    return $matches[0];
+                    return $fullMatch;
                 }
 
                 if (!$this->shouldTranslate($trimmedText)) {
-                    return $matches[0];
+                    return $fullMatch;
                 }
 
+                // Çevir
                 $translated = $this->translator->translate($trimmedText, $targetLang);
                 $this->stats['translated_strings']++;
 
@@ -362,56 +352,28 @@ class FileProcessor {
                 $leadingSpace = strlen($text) - strlen(ltrim($text));
                 $trailingSpace = strlen($text) - strlen(rtrim($text));
 
-                // Whitespace karakterlerini koru (space, tab, newline)
-                $leadingWs = substr($text, 0, $leadingSpace);
-                $trailingWs = substr($text, -$trailingSpace);
+                // Whitespace karakterlerini koru
+                $leadingWs = $leadingSpace > 0 ? substr($text, 0, $leadingSpace) : '';
+                $trailingWs = $trailingSpace > 0 ? substr($text, -$trailingSpace) : '';
 
-                return '<' . $tag . $attributes . '>' . $leadingWs . $translated . $trailingWs . '</' . $tag . '>';
+                // Çevrilmiş içeriği oluştur
+                $translatedTag = '<' . $tag . $attributes . '>' . $leadingWs . $translated . $trailingWs . '</' . $tag . '>';
+
+                // Bu etiketi placeholder ile değiştir (tekrar işlemeyi önle)
+                $placeholder = '___TRANSLATED_BLOCK_' . $translatedIndex . '___';
+                $translatedBlocks[$placeholder] = $translatedTag;
+                $translatedIndex++;
+
+                return $placeholder;
             }, $content);
         }
 
-        // Genel HTML etiketleri arasındaki kalan metinleri çevir
-        // DÜZELTME: .*? pattern ile uzun metinleri ve whitespace'leri yakala
-        $content = preg_replace_callback('/>(.*?)</s', function($matches) use ($targetLang) {
-            $text = $matches[1];
+        // Çevrilmiş blokları geri koy
+        foreach ($translatedBlocks as $placeholder => $translatedTag) {
+            $content = str_replace($placeholder, $translatedTag, $content);
+        }
 
-            // Sadece boşluk ve yeni satır varsa atla
-            if (trim($text) === '') {
-                return $matches[0];
-            }
-
-            // İç HTML etiketi varsa atla
-            if (preg_match('/<[a-z]/i', $text)) {
-                return $matches[0];
-            }
-
-            // PHP değişkeni veya kodu varsa atla
-            if (strpos($text, '$') !== false || strpos($text, '<?') !== false || strpos($text, '___') !== false) {
-                return $matches[0];
-            }
-
-            // Trim edilmiş halini kontrol et
-            $trimmedText = trim($text);
-
-            if (!$this->shouldTranslate($trimmedText)) {
-                return $matches[0];
-            }
-
-            $translated = $this->translator->translate($trimmedText, $targetLang);
-            $this->stats['translated_strings']++;
-
-            // Boşlukları koru
-            $leadingSpace = strlen($text) - strlen(ltrim($text));
-            $trailingSpace = strlen($text) - strlen(rtrim($text));
-
-            // Whitespace karakterlerini koru
-            $leadingWs = substr($text, 0, $leadingSpace);
-            $trailingWs = substr($text, -$trailingSpace);
-
-            return '>' . $leadingWs . $translated . $trailingWs . '<';
-        }, $content);
-
-        // Blokları geri koy (ters sırayla)
+        // Orijinal blokları geri koy (ters sırayla)
         foreach ($styleBlocks as $placeholder => $styleCode) {
             $content = str_replace($placeholder, $styleCode, $content);
         }
